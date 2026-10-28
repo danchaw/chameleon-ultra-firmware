@@ -42,6 +42,7 @@ NRF_LOG_MODULE_REGISTER();
 #include "rgb_marquee.h"
 #include "tag_persistence.h"
 #include "settings.h"
+#include "auto_poll.h"
 
 #if defined(PROJECT_CHAMELEON_ULTRA)
 #include "rc522.h"
@@ -1152,6 +1153,7 @@ int main(void) {
     sleep_timer_init();       // Soft timer initialization for hibernation
     tag_emulation_init();     // Analog card initialization
     rgb_marquee_init();       // Light effect initialization
+    auto_poll_init();         // Auto slot polling state machine (disabled by default)
 
     ble_passkey_init();       // init ble connect key.
 
@@ -1173,6 +1175,8 @@ int main(void) {
         battery_status_display_process();
         // Button event process
         button_press_process();
+        // Auto slot polling: rotate HF slots while a reader keeps trying keys
+        auto_poll_process();
 
 #if defined(PROJECT_CHAMELEON_ULTRA)
         // Field generator rainbow animation

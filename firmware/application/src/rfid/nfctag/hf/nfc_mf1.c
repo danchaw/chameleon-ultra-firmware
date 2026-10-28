@@ -11,6 +11,7 @@
 #include "mf1_crypto1.h"
 #else
 #include "crypto1_helper.h"
+#include "auto_poll.h"
 #endif
 
 #define NRF_LOG_MODULE_NAME tag_mf1
@@ -633,6 +634,8 @@ void nfc_tag_mf1_state_handler(uint8_t *p_data, uint16_t szDataBits) {
 
                             // Record verification log
                             append_mf1_auth_log_step1(KeyInUse, false, BlockAuth, CardNonce);
+                            // Auto slot polling: feed the reader-hammer detector (IRQ-safe)
+                            auto_poll_event(AUTO_POLL_EVT_AUTH_ATTEMPT);
 
                             // Use random card random numbers to respond, and hopes to obtain further authentication from the reader in the next frame.
                             m_mf1_state = MF1_STATE_AUTHENTICATING;
@@ -767,6 +770,8 @@ void nfc_tag_mf1_state_handler(uint8_t *p_data, uint16_t szDataBits) {
 #endif
                     // The verification is successful, and you need to enter the state that has been successfully verified
                     m_mf1_state = MF1_STATE_AUTHENTICATED;
+                    // Auto slot polling: the reader found its card here, stop rotation
+                    auto_poll_event(AUTO_POLL_EVT_AUTH_SUCCESS);
                     nfc_tag_14a_set_state(NFC_TAG_STATE_14A_PROPRIETARY);
                     // Package, stitch the Qiqi school inspection, return
                     m_tag_tx_buffer.tx_frame_bit_size = nfc_tag_14a_wrap_frame(m_tag_tx_buffer.tx_raw_buffer, 32, m_tag_tx_buffer.tx_bit_parity, m_tag_tx_buffer.tx_warp_frame);
@@ -993,6 +998,8 @@ void nfc_tag_mf1_state_handler(uint8_t *p_data, uint16_t szDataBits) {
 
                             // Record nested verification information
                             append_mf1_auth_log_step1(KeyInUse, true, BlockAuth, CardNonce);
+                            // Auto slot polling: nested attempts count as reader activity too
+                            auto_poll_event(AUTO_POLL_EVT_AUTH_ATTEMPT);
 
                             //Use random card random numbers to respond, and hopes to obtain further authentication from the reader in the next frame.
                             m_mf1_state = MF1_STATE_AUTHENTICATING;

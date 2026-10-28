@@ -5,12 +5,18 @@
 
 #include "utils.h"
 
-#define SETTINGS_CURRENT_VERSION 7
+#define SETTINGS_CURRENT_VERSION 8
 #define SETTINGS_SLEEP_TIMEOUT_DEFAULT_S 8   // default wake timeout in seconds (matches SLEEP_DELAY_MS_BUTTON_WAKEUP)
 #define SETTINGS_SLEEP_TIMEOUT_MIN_S      5
 #define SETTINGS_SLEEP_TIMEOUT_MAX_S      60
 #define SETTINGS_LONG_PRESS_THRESHOLD_DEFAULT_MS 1000
 #define SETTINGS_LONG_PRESS_THRESHOLD_MIN_MS     200
+#define SETTINGS_AUTO_POLL_INTERVAL_DEFAULT_MS 100
+#define SETTINGS_AUTO_POLL_INTERVAL_MIN_MS      50
+#define SETTINGS_AUTO_POLL_INTERVAL_MAX_MS      500
+// Full sweeps over the enabled HF slots before the poller gives up; 0 = unlimited.
+#define SETTINGS_AUTO_POLL_LAPS_DEFAULT 3
+#define SETTINGS_AUTO_POLL_LAPS_MAX     10
 #define BLE_PAIRING_KEY_LEN 6
 #define DEFAULT_BLE_PAIRING_KEY "123456"  // length must == 6
 
@@ -43,7 +49,8 @@ typedef struct ALIGN_U32 {
     // 1 byte
     uint8_t animation_config : 2;
     uint8_t ble_pairing_enable : 1;
-    uint8_t reserved0 : 5; // If you are add switch field, reallocating me.
+    uint8_t auto_poll_enable : 1; // rotate HF slots while a reader is authenticating (added on version8)
+    uint8_t auto_poll_laps : 4;   // sweep limit, 0 = unlimited (added on version8; fills the old reserved0 nibble)
 
     // 1 byte
     uint8_t button_a_press : 4;
@@ -61,6 +68,9 @@ typedef struct ALIGN_U32 {
 
     // 2 bytes (add on version7)
     uint16_t long_press_threshold; // long button press threshold in ms
+
+    // 2 bytes (add on version8)
+    uint16_t auto_poll_interval_ms; // auto slot polling interval in ms
 
     /*
      * Warning !!!!!!!!!!!!!!!!!!!!!! <-------------
@@ -92,4 +102,9 @@ void settings_init_sleep_timeout_config(void);
 uint16_t settings_get_long_press_threshold(void);
 void settings_set_long_press_threshold(uint16_t duration);
 void settings_init_long_press_threshold_config(void);
+bool settings_get_auto_poll_enable(void);
+uint16_t settings_get_auto_poll_interval_ms(void);
+uint8_t settings_get_auto_poll_max_laps(void);
+void settings_set_auto_poll_config(bool enable, uint16_t interval_ms, uint8_t max_laps);
+void settings_init_auto_poll_config(void);
 #endif
