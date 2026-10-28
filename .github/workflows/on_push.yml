@@ -14,6 +14,10 @@ jobs:
       packages: write
       contents: read
     uses: ./.github/workflows/build_firmware.yml
+    with:
+      # Fork builds: keep the builder image local (ghcr package would be private
+      # to this repo and the build job cannot pull it anonymously).
+      publish-builder: false
   client_pipeline:
     name: Build Firmware
     permissions:
