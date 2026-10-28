@@ -33,7 +33,9 @@ rm -rf "objects"
 
 (
   cd application
-  make -j
+  # This fork has no upstream v*.* tags, so git describe yields no semver and
+  # the Makefile's ifndef checks abort. Pin the version explicitly (2.3.x line).
+  make -j APP_FW_VER_MAJOR=2 APP_FW_VER_MINOR=3
 )
 
 (
