@@ -1,5 +1,6 @@
 #include "tag_emulation.h"
 
+#include "app_status.h"
 #include "crc_utils.h"
 #include "fds_ids.h"
 #include "fds_util.h"
