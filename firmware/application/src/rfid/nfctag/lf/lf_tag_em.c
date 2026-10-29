@@ -6,6 +6,7 @@
 #include "fds_util.h"
 #include "nrf_gpio.h"
 #include "nrf_soc.h"
+#include "rf_clock.h"
 #include "nrfx_lpcomp.h"
 #include "nrfx_pwm.h"
 #include "protocols/em410x.h"
@@ -40,7 +41,18 @@ static tag_specific_type_t m_tag_type = TAG_TYPE_UNDEFINED;
 const nrfx_pwm_t m_broadcast = NRFX_PWM_INSTANCE(0);
 const nrf_pwm_sequence_t *m_pwm_seq = NULL;
 
+// True while the LF emulation detects a real reader field (set in the
+// EVT_STOPPED check with antenna off + drain, cleared on field lost).
+// This is the reliable "reader present" signal for polling: sampling LPCOMP
+// directly from polling would false-positive on the device's own broadcast.
+static volatile bool m_lf_reader_present = false;
+static volatile bool m_polling_pause_requested;
+static volatile bool m_polling_paused;
+
 static void lf_field_lost(void) {
+    m_lf_reader_present = false;
+    m_polling_pause_requested = false;
+    m_polling_paused = false;
     // Open the incident interruption, so that the next event can be in and out normally
     g_is_tag_emulating = false;  // Reset the flag in the emulation
     m_is_lf_emulating = false;
@@ -83,13 +95,15 @@ static void lpcomp_event_handler(nrf_lpcomp_event_t event) {
     nrfx_lpcomp_disable();
 
     // set the emulation status logo bit
+    m_lf_reader_present = true;
+    m_polling_pause_requested = false;
+    m_polling_paused = false;
     m_is_lf_emulating = true;
     g_is_tag_emulating = true;
     // turn off USB light effect when emulating cards
     g_usb_led_marquee_enable = false;
 
     // LED status update
-    set_slot_light_color(RGB_BLUE);
     TAG_FIELD_LED_ON()
 
     // Play a finite burst then stop — field check happens in EVT_STOPPED after
@@ -122,11 +136,20 @@ static void pwm_handler(nrfx_pwm_evt_type_t event_type) {
     bsp_delay_ms(2);  // let peak detector drain: ~2 ms time constant on LF_RSSI
     if (is_lf_field_exists()) {
         // Field still present — play another finite burst then check again.
+        m_lf_reader_present = true;
+        if (m_polling_pause_requested) {
+            m_polling_paused = true;
+            return;
+        }
         nrfx_pwm_simple_playback(&m_broadcast, m_pwm_seq, 10, NRFX_PWM_FLAG_STOP);
     } else {
         // Field gone — clean up.
         lf_field_lost();
     }
+}
+
+bool lf_reader_field_present(void) {
+    return m_lf_reader_present;
 }
 
 static void pwm_init(void) {
@@ -164,14 +187,8 @@ static void lf_sense_enable(void) {
     // which rules out coherent demodulation or phase-lock-based approaches,
     // but does not preclude the differential-phase encodings supported here.
     //
-    // Paired release in lf_sense_disable(). SD reference-counts HFXO requests,
-    // so this coexists with BLE. Both functions run from thread context
-    // (tag_mode_enter/tag_emulation_sense_end) where SVCs are safe.
-    sd_clock_hfclk_request();
-    uint32_t hfclk_running = 0;
-    while (!hfclk_running) {
-        sd_clock_hfclk_is_running(&hfclk_running);
-    }
+    // Keep the shared HFXO request while either HF or LF emulation needs it.
+    rf_clock_acquire(RF_CLOCK_LF);
 
     lpcomp_init();
     pwm_init();  // use precise hardware pwm to broadcast card id
@@ -185,7 +202,10 @@ static void lf_sense_disable(void) {
     nrfx_lpcomp_uninit();
     m_pwm_seq = NULL;
     m_is_lf_emulating = false;
-    sd_clock_hfclk_release();
+    m_lf_reader_present = false;
+    m_polling_pause_requested = false;
+    m_polling_paused = false;
+    rf_clock_release(RF_CLOCK_LF);
 }
 
 static enum {
@@ -469,4 +489,17 @@ bool lf_tag_pyramid_data_factory(uint8_t slot, tag_specific_type_t tag_type) {
         0x01, 0x01, 0x01, 0x4A, 0xE3, 0x5E, 0x7F, 0x4F,
     };
     return lf_tag_data_factory(slot, tag_type, tag_id, sizeof(tag_id));
+}
+
+bool lf_polling_pause_at_boundary(void) {
+    m_polling_pause_requested = true;
+    return m_polling_paused;
+}
+void lf_polling_resume(void) {
+    m_polling_pause_requested = false;
+    if (m_polling_paused) {
+        m_polling_paused = false;
+        if (m_is_lf_emulating && m_pwm_seq != NULL)
+            nrfx_pwm_simple_playback(&m_broadcast, m_pwm_seq, 10, NRFX_PWM_FLAG_STOP);
+    }
 }

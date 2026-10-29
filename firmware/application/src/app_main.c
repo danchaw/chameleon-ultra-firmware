@@ -15,6 +15,9 @@
 #include "nfc_mf1.h"         // for nfc_tag_mf1_prng_seed
 #include "nrf_power.h"
 #include "nrf_pwr_mgmt.h"
+#define BOOTLOADER_DFU_GPREGRET_MASK            (0xB0)
+#define BOOTLOADER_DFU_START_BIT_MASK           (0x01)
+#define BOOTLOADER_DFU_START    (BOOTLOADER_DFU_GPREGRET_MASK | BOOTLOADER_DFU_START_BIT_MASK)
 #include "nrfx_nfct.h"
 #include "nrfx_power.h"
 #include "nrf_drv_lpcomp.h"
@@ -35,11 +38,15 @@ NRF_LOG_MODULE_REGISTER();
 #include "battery_health.h"
 #include "fds_util.h"
 #include "hex_utils.h"
+#include "polling.h"
+#include "lf_tag_em.h"
+#include "nfc_14a.h"
 #include "rfid_main.h"
 #include "syssleep.h"
 #include "tag_emulation.h"
 #include "usb_main.h"
 #include "rgb_marquee.h"
+#include "usb_led_mode.h"
 #include "tag_persistence.h"
 #include "settings.h"
 
@@ -78,6 +85,18 @@ volatile bool m_is_field_on = false;
 
 // cpu reset reason
 static uint32_t m_reset_source;
+static uint32_t m_boot_profile[8];
+static uint32_t m_boot_cycle_start, m_boot_dwt_ctrl, m_boot_demcr;
+
+static void boot_profile_mark(uint8_t stage) {
+    // Active CPU time at 64MHz; excludes bootloader and time with CPU halted.
+    m_boot_profile[stage] = (DWT->CYCCNT - m_boot_cycle_start) / 64000u;
+}
+
+void app_get_startup_diagnostics(uint32_t output[9]) {
+    memcpy(output, m_boot_profile, sizeof(m_boot_profile));
+    output[8] = m_reset_source;
+}
 static uint32_t m_gpregret_val;
 
 #define GPREGRET_CLEAR_VALUE_DEFAULT (0xFFFFFFFFUL)
@@ -209,6 +228,8 @@ static void button_pin_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t a
  * @param None
  * @return None
  */
+static volatile bool m_ab_reboot_pending;
+
 static void timer_button_event_handle(void *arg) {
     // if button press during shutdown, it's only to wake up quickly
     if (m_system_off_processing) {
@@ -269,6 +290,15 @@ static void timer_button_event_handle(void *arg) {
                 m_is_btn_long_press = is_long_press;
             }
         }
+
+        // A+B held together (>1s) triggers a soft reboot (configurable).
+        if (is_long_press && settings_get_ab_reboot_enable()) {
+            if ((pin == BUTTON_1 && m_is_a_btn_press) ||
+                (pin == BUTTON_2 && m_is_b_btn_press)) {
+                NRF_LOG_INFO("A+B long press: soft reboot");
+                m_ab_reboot_pending = true;
+            }
+        }
     }
 }
 
@@ -302,6 +332,7 @@ static void system_off_enter(void) {
     m_system_off_processing = true;
     // Save tag data
     tag_emulation_save();
+    polling_stop();
 
     if (g_is_low_battery_shutdown) {
         // Don't create too complex animations, just blink LED1 three times.
@@ -322,8 +353,8 @@ static void system_off_enter(void) {
         // Power off animation
         uint8_t animation_config = settings_get_animation_config();
         uint8_t slot = tag_emulation_get_slot();
-        uint8_t dir = slot > 3 ? 1 : 0;
-        uint8_t color = get_color_by_slot(slot);
+        uint8_t dir = (slot % 8) > 3 ? 1 : 0;
+        uint8_t color = get_slot_display_color(slot);
         if (m_reset_source & (NRF_POWER_RESETREAS_NFC_MASK | NRF_POWER_RESETREAS_LPCOMP_MASK)) {
             if (m_reset_source & NRF_POWER_RESETREAS_NFC_MASK) {
                 color = 1;
@@ -460,6 +491,7 @@ static void check_wakeup_src(void) {
     sd_power_gpregret_clr(1, GPREGRET_CLEAR_VALUE_DEFAULT);
 
 
+
     /*
      * Note: The hibernation described below is deep hibernation, stopping any non-wakeup source peripherals and stopping the CPU to achieve the lowest power consumption
      *
@@ -472,8 +504,8 @@ static void check_wakeup_src(void) {
      */
 
     uint8_t slot = tag_emulation_get_slot();
-    uint8_t dir = slot > 3 ? 1 : 0;
-    uint8_t color = get_color_by_slot(slot);
+    uint8_t dir = (slot % 8) > 3 ? 1 : 0;
+    uint8_t color = get_slot_display_color(slot);
 
     if (m_reset_source & NRF_POWER_RESETREAS_OFF_MASK) {
         NRF_LOG_INFO("WakeUp from button");
@@ -484,9 +516,9 @@ static void check_wakeup_src(void) {
         if (animation_config == SettingsAnimationModeFull) {
             rgb_marquee_sweep_to(color, !dir, 11);
             rgb_marquee_sweep_to(color, dir, 11);
-            rgb_marquee_sweep_to(color, !dir, dir ? slot : 7 - slot);
+            rgb_marquee_sweep_to(color, !dir, dir ? (slot % 8) : 7 - (slot % 8));
         } else if (animation_config == SettingsAnimationModeMinimal) {
-            rgb_marquee_sweep_to(color, !dir, dir ? slot : 7 - slot);
+            rgb_marquee_sweep_to(color, !dir, dir ? (slot % 8) : 7 - (slot % 8));
         } else if (animation_config == SettingsAnimationModeSymmetric) {
             rgb_marquee_symmetric_out(color, slot);
         } else {
@@ -495,6 +527,7 @@ static void check_wakeup_src(void) {
 
         // The indicator of the current card slot lights up at the end of the animation
         light_up_by_slot();
+        polling_start();
 
         // If no operation follows, wait for the configured timeout and then deep hibernate
         sleep_timer_start(settings_get_sleep_timeout());
@@ -502,32 +535,13 @@ static void check_wakeup_src(void) {
                (m_gpregret_val & RESET_ON_LF_FIELD_EXISTS_Msk)) {
         NRF_LOG_INFO("WakeUp from rfid field");
 
-        // wake up from hf field.
-        if (m_reset_source & NRF_POWER_RESETREAS_NFC_MASK) {
-            color = 1;  // HF field show G.
-            NRF_LOG_INFO("WakeUp from HF");
-        } else {
-            color = 2;  // LF filed show B.
-            if (m_gpregret_val & RESET_ON_LF_FIELD_EXISTS_Msk) {
-                NRF_LOG_INFO("Reset by LF");
-            } else {
-                NRF_LOG_INFO("WakeUp from LF");
-            }
-        }
-
-        // It is currently the wake-up system of the emulation card event, we can make the strong lights on the field first
-        TAG_FIELD_LED_ON();
-
-        uint8_t animation_config = settings_get_animation_config();
-        if (animation_config == SettingsAnimationModeFull) {
-            // In the case of field wake-up, only one round of RGB is swept as the power-on animation
-            rgb_marquee_sweep_to(color, !dir, dir ? slot : 7 - slot);
-        } else if (animation_config == SettingsAnimationModeSymmetric) {
-            rgb_marquee_symmetric_out(color, slot);
-        } else {
-            set_slot_light_color(color);
-        }
+        // RF wake must enable reception before any blocking LED animation.
+        // Readers may send their first request while the MCU is still booting.
+        tag_mode_enter();
+        nfc_tag_14a_startup_recovery_schedule();
         light_up_by_slot();
+
+        polling_start();
 
         // We can only run tag emulation at field wakeup source.
         sleep_timer_start(SLEEP_DELAY_MS_FIELD_WAKEUP);
@@ -541,6 +555,7 @@ static void check_wakeup_src(void) {
 
         // Start Bluetooth radio with USB plugged in, no deep hibernation required
         advertising_start(false);
+        polling_start();
     } else {
         NRF_LOG_INFO("First power system");
 
@@ -571,6 +586,7 @@ static void check_wakeup_src(void) {
         // Show RGB for slot.
         set_slot_light_color(color);
         light_up_by_slot();
+        polling_start();
 
         // If the USB is plugged in when first powered up, we can do something accordingly
         if (nrfx_power_usbstatus_get() != NRFX_POWER_USB_STATE_DISCONNECTED) {
@@ -596,6 +612,7 @@ static void cycle_slot(bool dec) {
         slot_new = tag_emulation_slot_find_next(slot_now);
     }
     // Update status only if the new card slot switch is valid
+    polling_forget_session();
     tag_emulation_change_slot(slot_new, true); // Tell the analog card module that we need to switch card slots
     // Turn off the LEDs in case we were showing the battery status
     rgb_marquee_stop();
@@ -605,6 +622,8 @@ static void cycle_slot(bool dec) {
     }
     // Go back to the color corresponding to the field enablement type
     apply_slot_change(slot_now, slot_new);
+    // Manual slot switch resets the polling cycle
+    polling_start();
 }
 
 static void battery_status_display_restore_slot(void) {
@@ -759,7 +778,7 @@ static void battery_status_display_on_button_cancel(void) {
 static void offline_status_blink_color(uint8_t blink_color) {
     uint8_t slot = tag_emulation_get_slot();
 
-    uint8_t color = get_color_by_slot(slot);
+    uint8_t color = get_slot_display_color(slot);
 
     uint32_t *p_led_array = hw_get_led_array();
 
@@ -1037,6 +1056,43 @@ static void run_button_function_by_settings(settings_button_function_t sbf) {
             show_battery();
             break;
 
+        case SettingsButtonTogglePolling:
+            rgb_marquee_stop();
+            settings_set_polling_enable(!settings_get_polling_enable());
+            settings_save_config();
+            if (settings_get_polling_enable()) {
+                NRF_LOG_INFO("Polling enabled by button press");
+                polling_start();
+                // Feedback: all LEDs flash green
+                set_slot_light_color(RGB_GREEN);
+                uint32_t *led_pins = hw_get_led_array();
+                for (uint8_t i = 0; i < RGB_LIST_NUM; i++) {
+                    nrf_gpio_pin_set(led_pins[i]);
+                }
+                bsp_delay_ms(300);
+            } else {
+                NRF_LOG_INFO("Polling disabled by button press");
+                polling_stop();
+                // Feedback: all LEDs flash red
+                set_slot_light_color(RGB_RED);
+                uint32_t *led_pins = hw_get_led_array();
+                for (uint8_t i = 0; i < RGB_LIST_NUM; i++) {
+                    nrf_gpio_pin_set(led_pins[i]);
+                }
+                bsp_delay_ms(300);
+            }
+            light_up_by_slot();
+            break;
+
+        case SettingsButtonEnterDfuMode:
+            NRF_LOG_INFO("Entering DFU mode by button press");
+            settings_save_config();
+            tag_emulation_save();
+            sd_power_gpregret_clr(0, 0xffffffff);
+            sd_power_gpregret_set(0, BOOTLOADER_DFU_START);
+            nrf_pwr_mgmt_shutdown(NRF_PWR_MGMT_SHUTDOWN_GOTO_DFU);
+            break;
+
         default:
             NRF_LOG_ERROR("Unsupported button function");
             break;
@@ -1080,9 +1136,20 @@ static void button_press_process(void) {
 extern bool g_usb_port_opened;
 static void blink_usb_led_status(void) {
     uint8_t slot = tag_emulation_get_slot();
-    uint8_t color = get_color_by_slot(slot);
-    uint8_t dir = slot > 3 ? 1 : 0;
+    uint8_t color = get_slot_display_color(slot);
+    uint8_t dir = (slot % 8) > 3 ? 1 : 0;
     static bool is_working = false;
+    static uint8_t last_usb_mode;
+    static usb_led_mode_t led_mode;
+    bool usb_disconnected = nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED;
+    if (usb_disconnected) led_mode = (usb_led_mode_t){0};
+    bool show_connected = usb_led_mode_update(&led_mode,
+        !usb_disconnected && g_usb_port_opened, app_timer_cnt_get(), APP_TIMER_TICKS(1000));
+    uint8_t usb_mode = show_connected ? 2 : 1;
+    if (usb_mode != last_usb_mode) {
+        rgb_marquee_stop();
+        last_usb_mode = usb_mode;
+    }
     if (nrfx_power_usbstatus_get() == NRFX_POWER_USB_STATE_DISCONNECTED) {
         if (is_working) {
             rgb_marquee_stop();
@@ -1094,7 +1161,7 @@ static void blink_usb_led_status(void) {
         // The light effect is enabled and can be displayed
         if (rgb_marquee_is_enabled()) {
             is_working = true;
-            if (g_usb_port_opened) {
+            if (show_connected) {
                 uint8_t animation_config = settings_get_animation_config();
                 if (animation_config == SettingsAnimationModeSymmetric) {
                     rgb_marquee_usb_open_symmetric(color);
@@ -1132,25 +1199,39 @@ static void ble_passkey_init(void) {
 /**@brief Application main function.
  */
 int main(void) {
+    m_boot_demcr = CoreDebug->DEMCR;
+    m_boot_dwt_ctrl = DWT->CTRL;
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    m_boot_cycle_start = DWT->CYCCNT;
     hw_connect_init();        // Remember to initialize the pins first
 
     fds_util_init();          // Initialize fds tool
     settings_load_config();   // Load settings from flash
+    boot_profile_mark(0);
 
     init_leds();              // LED initialization
+    // Show the field wake before BLE, random seeding, and RF clock waits.
+    if (NRF_POWER->RESETREAS & (NRF_POWER_RESETREAS_NFC_MASK | NRF_POWER_RESETREAS_LPCOMP_MASK)) {
+        TAG_FIELD_LED_ON();
+    }
     log_init();               // Log initialization
     gpio_te_init();           // Initialize GPIO matrix library
     app_timers_init();        // Initialize soft timer
     power_management_init();  // Power management initialization
     usb_cdc_init();           // USB cdc emulation initialization
     ble_slave_init();         // Bluetooth protocol stack initialization
+    boot_profile_mark(1);
 
     rng_drv_and_srand_init(); // Random number generator initialization
+    boot_profile_mark(2);
     bsp_timer_init();         // Initialize timeout timer
     bsp_timer_start();        // Start BSP TIMER and prepare it for processing business logic
     button_init();            // Button initialization for handling business logic
     sleep_timer_init();       // Soft timer initialization for hibernation
     tag_emulation_init();     // Analog card initialization
+    boot_profile_mark(3);
+    polling_init();           // Fixed-delay slot polling timer
     rgb_marquee_init();       // Light effect initialization
 
     ble_passkey_init();       // init ble connect key.
@@ -1158,11 +1239,17 @@ int main(void) {
     // cmd callback register
     on_data_frame_complete(on_data_frame_received);
 
+    boot_profile_mark(4);
     check_wakeup_src();       // Detect wake-up source and decide BLE broadcast and subsequent hibernation action according to the wake-up source
+    boot_profile_mark(5);
     tag_mode_enter();         // Enter card emulation mode by default
+    boot_profile_mark(6);
 
     // usbd event listener
     APP_ERROR_CHECK(app_usbd_power_events_enable());
+    boot_profile_mark(7);
+    DWT->CTRL = m_boot_dwt_ctrl;
+    CoreDebug->DEMCR = m_boot_demcr;
 
     bsp_wdt_init();
     // Enter main loop.
@@ -1173,6 +1260,17 @@ int main(void) {
         battery_status_display_process();
         // Button event process
         button_press_process();
+        // Fixed-delay slot polling process
+        nfc_tag_14a_startup_recovery_process();
+        if (m_ab_reboot_pending) {
+            settings_save_config();
+            tag_emulation_save();
+            nrf_pwr_mgmt_shutdown(NRF_PWR_MGMT_SHUTDOWN_RESET);
+        }
+        polling_process();
+        if (get_device_mode() == DEVICE_MODE_TAG) {
+            sleep_rf_update(nfc_tag_14a_field_present() || lf_reader_field_present());
+        }
 
 #if defined(PROJECT_CHAMELEON_ULTRA)
         // Field generator rainbow animation

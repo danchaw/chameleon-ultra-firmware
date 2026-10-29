@@ -59,6 +59,7 @@ typedef struct
 {
     const nrfx_timer_t timer;                     /**< Timer instance that supports the correct NFC field detection. */
 #if defined(NRF52833_XXAA) || defined(NRF52840_XXAA)
+    bool               validation_pending;       /**< Activation validation belongs to this driver lifetime. */
     bool               fieldevents_filter_active; /**< Flag that indicates that the field events are ignored. */
     bool               is_hfclk_on;               /**< HFCLK has started - one of the NFC activation conditions. */
     bool               is_delayed;                /**< Required time delay has passed - one of the NFC activation conditions. */
@@ -148,6 +149,22 @@ typedef struct
 } nrfx_nfct_control_block_t;
 
 static nrfx_nfct_control_block_t m_nfct_cb;
+
+// Reset all field-event bookkeeping when the sensor lifetime changes.
+static void nrfx_nfct_session_clear(void)
+{
+    // A new sensing lifetime must generate FIELD_DETECTED even when the
+    // previous lifetime was stopped while the reader field was still on.
+    m_nfct_cb.field_on = false;
+#if defined(NRF52833_XXAA) || defined(NRF52840_XXAA)
+    m_timer_workaround.validation_pending = false;
+    m_timer_workaround.fieldevents_filter_active = false;
+    m_timer_workaround.is_hfclk_on = false;
+    m_timer_workaround.is_delayed = false;
+#elif defined(USE_TIMER_WORKAROUND)
+    m_timer_workaround.field_state_cnt = 0;
+#endif
+}
 
 /**
  * @brief Common part of the setup used for the NFCT initialization and reinitialization.
@@ -270,11 +287,10 @@ static void nrfx_nfct_field_event_handler(volatile nrfx_nfct_field_state_t field
 #if defined(NRF52833_XXAA) || defined(NRF52840_XXAA)
 static void nrfx_nfct_activate_check(void)
 {
-    static bool is_field_validation_pending = false;
 
-    if (is_field_validation_pending)
+    if (m_timer_workaround.validation_pending)
     {
-        is_field_validation_pending                  = false;
+        m_timer_workaround.validation_pending                  = false;
         m_timer_workaround.fieldevents_filter_active = false;
 
         // Check the field status and take action if field is lost.
@@ -285,7 +301,7 @@ static void nrfx_nfct_activate_check(void)
     if ((m_timer_workaround.is_hfclk_on) && (m_timer_workaround.is_delayed))
     {
         nrf_nfct_task_trigger(NRF_NFCT_TASK_ACTIVATE);
-        is_field_validation_pending = true;
+        m_timer_workaround.validation_pending = true;
 
         // Start the timer second time to validate whether the tag has locked to the field.
         nrfx_timer_clear(&m_timer_workaround.timer);
@@ -416,7 +432,11 @@ static inline nrfx_err_t nrfx_nfct_field_timer_config(void)
  */
 static void timer_nfc_close_handle(void *arg) {
     NRFX_CRITICAL_SECTION_ENTER();
-    nrf_nfct_task_trigger(NRF_NFCT_TASK_SENSE);
+    // A timeout queued before stop/reinit must not shut down a new session.
+    if (m_nfct_cb.state != NRFX_DRV_STATE_UNINITIALIZED && !m_nfct_cb.field_on)
+    {
+        nrf_nfct_task_trigger(NRF_NFCT_TASK_SENSE);
+    }
     NRFX_CRITICAL_SECTION_EXIT();
 }
 
@@ -456,6 +476,7 @@ nrfx_err_t nrfx_nfct_init(nrfx_nfct_config_t const * p_config)
         return NRFX_ERROR_INVALID_STATE;
     }
 
+    nrfx_nfct_session_clear();
     m_nfct_cb.config = *p_config;
     nrfx_nfct_hw_init_setup();
 
@@ -510,19 +531,30 @@ void nrfx_nfct_uninit(void)
     nrfx_timer_uninit(&m_timer_workaround.timer);
 #endif // defined(USE_TIMER_WORKAROUND)
 
+    nrfx_nfct_session_clear();
     m_nfct_cb.state = NRFX_DRV_STATE_UNINITIALIZED;
 }
 
 void nrfx_nfct_enable(void)
 {
     nrf_nfct_error_status_clear(NRFX_NFCT_ERROR_STATUS_ALL_MASK);
+    nrf_nfct_event_clear(NRF_NFCT_EVENT_READY);
     nrf_nfct_task_trigger(NRF_NFCT_TASK_SENSE);
 
     nrf_nfct_int_enable(NRF_NFCT_INT_FIELDDETECTED_MASK | NRF_NFCT_INT_ERROR_MASK |
-                        NRF_NFCT_INT_SELECTED_MASK);
+                        NRF_NFCT_INT_SELECTED_MASK | NRF_NFCT_INT_READY_MASK);
 #if !defined(NRF52832_XXAA) && !defined(NRF52832_XXAB)
     nrf_nfct_int_enable(NRF_NFCT_INT_FIELDLOST_MASK);
 #endif // !defined(NRF52832_XXAA) && !defined(NRF52832_XXAB)
+
+    // A field that woke SYSTEMOFF may already be present before interrupts
+    // are enabled. Do not depend on a fresh FIELDDETECTED edge after boot.
+    NRFX_CRITICAL_SECTION_ENTER();
+    if (nrfx_nfct_field_check())
+    {
+        nrfx_nfct_field_event_handler(NRFX_NFC_FIELD_STATE_ON);
+    }
+    NRFX_CRITICAL_SECTION_EXIT();
 
     NRFX_LOG_INFO("Start");
 }
@@ -782,6 +814,17 @@ void nrfx_nfct_irq_handler(void)
     if (current_field != NRFX_NFC_FIELD_STATE_NONE)
     {
         nrfx_nfct_field_event_handler(current_field);
+    }
+
+    if (NRFX_NFCT_EVT_ACTIVE(READY))
+    {
+        nrf_nfct_event_clear(NRF_NFCT_EVENT_READY);
+        // A READY left over from a lost field must not restart reception.
+        if (m_nfct_cb.field_on)
+        {
+            nrfx_nfct_evt_t nfct_evt = { .evt_id = NRFX_NFCT_EVT_READY };
+            NRFX_NFCT_CB_HANDLE(m_nfct_cb.config.cb, nfct_evt);
+        }
     }
 
     // ChameleonUltra: fix busy IRQ when HF field is on and a first frame got received
