@@ -13,7 +13,6 @@
 #include "tag_persistence.h"
 #include "nrf_pwr_mgmt.h"
 #include "settings.h"
-#include "auto_poll.h"
 #include "delayed_reset.h"
 #include "netdata.h"
 #if defined(PROJECT_CHAMELEON_ULTRA)
@@ -1594,43 +1593,6 @@ static data_frame_tx_t *cmd_processor_mf1_get_detection_count(uint16_t cmd, uint
     }
     uint32_t payload = U32HTONL(count);
     return data_frame_make(cmd, STATUS_SUCCESS, sizeof(uint32_t), (uint8_t *)&payload);
-}
-
-static data_frame_tx_t *cmd_processor_set_auto_poll(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    typedef struct {
-        uint8_t enable;
-        uint16_t interval_ms;
-        uint8_t max_laps;
-    } PACKED payload_t;
-    if (length != sizeof(payload_t)) {
-        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
-    }
-    payload_t *payload = (payload_t *)data;
-    bool enable = payload->enable != 0;
-    uint16_t interval_ms = U16NTOHS(payload->interval_ms);
-    if (enable && (interval_ms < SETTINGS_AUTO_POLL_INTERVAL_MIN_MS || interval_ms > SETTINGS_AUTO_POLL_INTERVAL_MAX_MS)) {
-        return data_frame_make(cmd, STATUS_PAR_ERR, 0, NULL);
-    }
-    settings_set_auto_poll_config(enable, interval_ms, payload->max_laps);
-    settings_save_config();
-    NRF_LOG_INFO("auto_poll config set: enable=%d interval=%d ms laps=%d", (int)enable, interval_ms, payload->max_laps);
-    return data_frame_make(cmd, STATUS_SUCCESS, 0, NULL);
-}
-
-static data_frame_tx_t *cmd_processor_get_auto_poll(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
-    typedef struct {
-        uint8_t enable;
-        uint16_t interval_ms;
-        uint8_t rotating;
-        uint8_t max_laps;
-    } PACKED payload_t;
-    payload_t payload = {
-        .enable = settings_get_auto_poll_enable() ? 1 : 0,
-        .interval_ms = U16HTONS(settings_get_auto_poll_interval_ms()),
-        .rotating = auto_poll_is_rotating() ? 1 : 0,
-        .max_laps = settings_get_auto_poll_max_laps(),
-    };
-    return data_frame_make(cmd, STATUS_SUCCESS, sizeof(payload_t), (uint8_t *)&payload);
 }
 
 static data_frame_tx_t *cmd_processor_mf1_get_detection_log(uint16_t cmd, uint16_t status, uint16_t length, uint8_t *data) {
@@ -3369,8 +3331,6 @@ static cmd_data_map_t m_data_cmd_map[] = {
     {    DATA_CMD_MF1_GET_DETECTION_COUNT,      NULL,                        cmd_processor_mf1_get_detection_count,       NULL                   },
     {    DATA_CMD_MF1_GET_DETECTION_LOG,        NULL,                        cmd_processor_mf1_get_detection_log,         NULL                   },
     {    DATA_CMD_MF1_GET_DETECTION_ENABLE,     NULL,                        cmd_processor_mf1_get_detection_enable,      NULL                   },
-    {    DATA_CMD_SET_AUTO_POLL,                NULL,                        cmd_processor_set_auto_poll,                 NULL                   },
-    {    DATA_CMD_GET_AUTO_POLL,                NULL,                        cmd_processor_get_auto_poll,                 NULL                   },
     {    DATA_CMD_MF1_READ_EMU_BLOCK_DATA,      NULL,                        cmd_processor_mf1_read_emu_block_data,       NULL                   },
     {    DATA_CMD_MF1_GET_EMULATOR_CONFIG,      NULL,                        cmd_processor_mf1_get_emulator_config,       NULL                   },
     {    DATA_CMD_MF1_GET_PRNG_TYPE,            NULL,                        cmd_processor_mf1_get_prng_type,             NULL                   },

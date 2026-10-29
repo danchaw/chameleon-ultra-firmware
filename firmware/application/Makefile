@@ -51,7 +51,6 @@ SRC_FILES += \
   $(PROJ_DIR)/utils/dataframe.c \
   $(PROJ_DIR)/utils/battery_health.c \
   $(PROJ_DIR)/utils/delayed_reset.c \
-$(PROJ_DIR)/utils/auto_poll.c \
   $(PROJ_DIR)/utils/fds_util.c \
   $(PROJ_DIR)/utils/syssleep.c \
   $(PROJ_DIR)/utils/timeslot.c \

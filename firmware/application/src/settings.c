@@ -63,13 +63,6 @@ void settings_init_long_press_threshold_config(void) {
     config.long_press_threshold = SETTINGS_LONG_PRESS_THRESHOLD_DEFAULT_MS;
 }
 
-// add on version8
-void settings_init_auto_poll_config(void) {
-    config.auto_poll_enable = false; // stock behaviour by default
-    config.auto_poll_interval_ms = SETTINGS_AUTO_POLL_INTERVAL_DEFAULT_MS;
-    config.auto_poll_laps = SETTINGS_AUTO_POLL_LAPS_DEFAULT;
-}
-
 void settings_init_config(void) {
     settings_update_version_for_config();
     config.animation_config = SettingsAnimationModeFull; // add on version1
@@ -79,7 +72,6 @@ void settings_init_config(void) {
     settings_init_ble_pairing_enable_config();
     settings_init_sleep_timeout_config();
     settings_init_long_press_threshold_config();
-    settings_init_auto_poll_config();
 }
 
 void settings_migrate(void) {
@@ -105,9 +97,6 @@ void settings_migrate(void) {
 
         case 6:
             settings_init_long_press_threshold_config();
-
-        case 7:
-            settings_init_auto_poll_config();
 
             /*
              * Add new migration steps ABOVE THIS COMMENT
@@ -338,38 +327,4 @@ void settings_set_long_press_threshold(uint16_t duration) {
         duration = SETTINGS_LONG_PRESS_THRESHOLD_MIN_MS;
     }
     config.long_press_threshold = duration;
-}
-
-bool settings_get_auto_poll_enable(void) {
-    return config.auto_poll_enable;
-}
-
-uint16_t settings_get_auto_poll_interval_ms(void) {
-    if (config.auto_poll_interval_ms < SETTINGS_AUTO_POLL_INTERVAL_MIN_MS ||
-        config.auto_poll_interval_ms > SETTINGS_AUTO_POLL_INTERVAL_MAX_MS) {
-        return SETTINGS_AUTO_POLL_INTERVAL_DEFAULT_MS;
-    }
-    return config.auto_poll_interval_ms;
-}
-
-uint8_t settings_get_auto_poll_max_laps(void) {
-    if (config.auto_poll_laps > SETTINGS_AUTO_POLL_LAPS_MAX) {
-        return SETTINGS_AUTO_POLL_LAPS_DEFAULT;
-    }
-    return config.auto_poll_laps;
-}
-
-void settings_set_auto_poll_config(bool enable, uint16_t interval_ms, uint8_t max_laps) {
-    if (interval_ms < SETTINGS_AUTO_POLL_INTERVAL_MIN_MS) {
-        interval_ms = SETTINGS_AUTO_POLL_INTERVAL_MIN_MS;
-    }
-    if (interval_ms > SETTINGS_AUTO_POLL_INTERVAL_MAX_MS) {
-        interval_ms = SETTINGS_AUTO_POLL_INTERVAL_MAX_MS;
-    }
-    if (max_laps > SETTINGS_AUTO_POLL_LAPS_MAX) {
-        max_laps = SETTINGS_AUTO_POLL_LAPS_DEFAULT;
-    }
-    config.auto_poll_enable = enable;
-    config.auto_poll_interval_ms = interval_ms;
-    config.auto_poll_laps = max_laps;
 }

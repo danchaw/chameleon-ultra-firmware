@@ -176,9 +176,6 @@
 #define DATA_CMD_SEOS_READ_EMU_DATA             (4042)
 #define DATA_CMD_SEOS_WRITE_EMU_DATA            (4043)
 #define DATA_CMD_SEOS_WRITE_EMU_KEYS            (4044)
-// Auto slot polling (rotate HF slots while a reader is authenticating)
-#define DATA_CMD_SET_AUTO_POLL                  (4045)
-#define DATA_CMD_GET_AUTO_POLL                  (4046)
 //
 // ******************************************************************
 
